@@ -1,0 +1,20 @@
+[package]
+name = "rpmh-service"
+version = "1.0.0"
+edition = "2021"
+
+# lib: the platform parsers and trigger-dump paths (host-testable core).
+[lib]
+name = "rpmh_service"
+path = "src/lib.rs"
+
+# bin: the Android AIDL HAL binary. The shipped artifact name has dots, so
+# the build wraps the output (see ../../scripts/build_rust.sh).
+[[bin]]
+name = "rpmh_service"
+path = "src/bin/rpmh_service.rs"
+
+[profile.release]
+opt-level = 2
+debug = false
+strip = "symbols"
