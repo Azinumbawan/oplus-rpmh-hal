@@ -21,6 +21,7 @@
 
 use std::ffi::{c_char, c_void, CString};
 use std::os::raw::c_int;
+use std::ptr;
 
 #[repr(C)]
 pub struct AIBinder {
@@ -231,50 +232,78 @@ pub fn read_i32(in_parcel: *const AParcel) -> Result<i32, BinderStatus> {
 }
 
 pub fn read_string(in_parcel: *const AParcel) -> Result<String, BinderStatus> {
-    let mut sink = StringSink::default();
-    // SAFETY: in_parcel is a valid incoming data parcel; the allocator copies
-    // the bytes out before the call returns.
+    let mut ctx = StringCtx {
+        buf: ptr::null_mut(),
+        layout: std::alloc::Layout::new::<u8>(),
+    };
+    // SAFETY: in_parcel is a valid incoming data parcel. The allocator
+    // callback leases a buffer that libbinder fills with the string, and the
+    // StringCtx Drop frees it when the ctx goes out of scope.
     let rc = unsafe {
         AParcel_readString(
             in_parcel,
-            &mut sink as *mut StringSink as *mut c_void,
+            &mut ctx as *mut StringCtx as *mut c_void,
             Some(string_allocator),
         )
     };
-    if rc == STATUS_OK {
-        sink.take()
-    } else {
-        Err(rc)
+    if rc != STATUS_OK {
+        return Err(rc);
     }
+    if ctx.buf.is_null() {
+        // A null string in the parcel reads as empty.
+        return Ok(String::new());
+    }
+    // SAFETY: buf holds layout.size() bytes with the string and its NUL
+    // terminator written by libbinder inside them.
+    let bytes = unsafe { std::slice::from_raw_parts(ctx.buf, ctx.layout.size()) };
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    Ok(String::from_utf8_lossy(&bytes[..end]).into_owned())
 }
 
-#[derive(Default)]
-struct StringSink {
-    data: Option<String>,
+/// A binder transaction is capped at 1 MiB, so no larger string is legitimate.
+const MAX_PARCEL_STRING: usize = 1 << 20;
+
+struct StringCtx {
+    buf: *mut u8,
+    layout: std::alloc::Layout,
 }
 
-impl StringSink {
-    fn take(&mut self) -> Result<String, BinderStatus> {
-        match self.data.take() {
-            Some(s) => Ok(s),
-            None => Err(-22),
+impl Drop for StringCtx {
+    fn drop(&mut self) {
+        if !self.buf.is_null() {
+            // SAFETY: buf was allocated with exactly this layout.
+            unsafe { std::alloc::dealloc(self.buf, self.layout) };
         }
     }
 }
 
 unsafe extern "C" fn string_allocator(
     data: *mut c_void,
-    _length: i32,
-    string_data: *mut *mut c_char,
+    length: i32,
+    buffer: *mut *mut c_char,
 ) -> bool {
-    let sink = &mut *(data as *mut StringSink);
-    match std::ffi::CStr::from_ptr(*string_data).to_str() {
-        Ok(text) => {
-            sink.data = Some(text.to_string());
-            true
-        }
-        Err(_) => false,
+    let ctx = &mut *(data as *mut StringCtx);
+    // AParcel_stringAllocator contract (binder_parcel.h): length includes the
+    // NUL terminator, and -1 means a null string, which succeeds with no
+    // buffer. 0 is documented as never sent; treat it the same way.
+    if length <= 0 {
+        return true;
     }
+    if (length as usize) > MAX_PARCEL_STRING {
+        return false;
+    }
+    let layout = match std::alloc::Layout::from_size_align(length as usize, 1) {
+        Ok(l) => l,
+        Err(_) => return false,
+    };
+    let p = std::alloc::alloc(layout);
+    if p.is_null() {
+        return false;
+    }
+    ctx.buf = p;
+    ctx.layout = layout;
+    *buffer = p as *mut c_char;
+    true
 }
 
 /// Writes an int32 list length followed by nothing: the shipped server
