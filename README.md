@@ -27,6 +27,10 @@ the crate contains no C or C++ sources and no generated backend library.
 - A platform `libbinder_ndk.so` exporting `AServiceManager_addService` and the
   `ABinderProcess_*` entry points. Set `LIBBINDER_NDK` to its path.
 
+## Prebuilt
+
+[Get Prebuilt](https://github.com/Xia-s-Projekt/oplus-rpmh-hal/releases/latest) — prebuilt AArch64 service binary.
+
 ## Build
 
 ```bash
