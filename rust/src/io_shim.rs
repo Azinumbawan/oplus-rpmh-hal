@@ -6,13 +6,20 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::cell::RefCell;
+#[cfg(test)]
 use std::sync::Mutex;
 
-static TEST_ROOT: Mutex<Option<String>> = Mutex::new(None);
+// Test-only overrides must not leak between test threads: libtest runs each
+// #[test] on its own thread, and a process-global root would let one test's
+// fixture path bleed into another's resolve().
+thread_local! {
+    static TEST_ROOT: RefCell<Option<String>> = RefCell::new(None);
+}
 
 fn resolve(path: &Path) -> PathBuf {
     if path.is_absolute() {
-        let root = TEST_ROOT.lock().unwrap().clone();
+        let root = TEST_ROOT.with(|r| r.borrow().clone());
         if let Some(root) = root {
             let stripped = path
                 .strip_prefix("/")
@@ -37,12 +44,12 @@ pub fn write_file<P: AsRef<Path>>(path: P, value: &str) -> bool {
 
 #[cfg(test)]
 pub fn set_test_root(root: &str) {
-    *TEST_ROOT.lock().unwrap() = Some(root.to_string());
+    TEST_ROOT.with(|r| *r.borrow_mut() = Some(root.to_string()));
 }
 
 #[cfg(test)]
 pub fn clear_test_root() {
-    *TEST_ROOT.lock().unwrap() = None;
+    TEST_ROOT.with(|r| *r.borrow_mut() = None);
 }
 
 #[cfg(test)]
@@ -82,14 +89,16 @@ pub fn property_get(key: &str) -> Option<String> {
 }
 
 #[cfg(not(target_os = "android"))]
+thread_local! {
+    // Each host test thread gets its own empty property store, so a property
+    // set by one test (e.g. a trigger flag) is never observed by another.
+    static PROPS: RefCell<std::collections::HashMap<String, String>> =
+        RefCell::new(std::collections::HashMap::new());
+}
+
+#[cfg(not(target_os = "android"))]
 fn with_props<R>(f: impl FnOnce(&mut std::collections::HashMap<String, String>) -> R) -> R {
-    use std::sync::Mutex;
-    static PROPS: Mutex<Option<std::collections::HashMap<String, String>>> = Mutex::new(None);
-    let mut store = PROPS.lock().unwrap();
-    if store.is_none() {
-        *store = Some(std::collections::HashMap::new());
-    }
-    f(store.as_mut().unwrap())
+    PROPS.with(|store| f(&mut store.borrow_mut()))
 }
 
 #[cfg(not(target_os = "android"))]
