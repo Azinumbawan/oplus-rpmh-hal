@@ -1,7 +1,6 @@
-// OPlus Rpmh HAL service entry point (Rust port).
+// OPlus Rpmh HAL service entry point.
 //
-// Startup recovered from the shipped binary and its init rc
-// (erofs/vendor/etc/init/vendor.oplus.hardware.rpmh-V1-service.rc):
+// Startup sequence:
 //
 //   ABinderProcess_setThreadPoolMaxThreadCount(0);
 //   name   = "vendor.oplus.hardware.rpmh.IRpmh/default";

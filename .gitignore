@@ -1,1 +1,18 @@
+# Cargo build output
 /rust/target/
+
+# Compiler / linker artifacts
+*.o
+*.a
+*.so
+*.rlib
+*.rmeta
+
+# Project build output
+/build/
+/dist/
+/out/
+
+# Editor and OS files
+*.swp
+.DS_Store

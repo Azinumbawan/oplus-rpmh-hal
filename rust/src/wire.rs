@@ -306,8 +306,8 @@ unsafe extern "C" fn string_allocator(
     true
 }
 
-/// Writes an int32 list length followed by nothing: the shipped server
-/// answers an unreadable set with a length of 0 and the framework accepts it.
+/// Writes an int32 list length followed by nothing: an unreadable set is
+/// answered with a length of 0, which the framework accepts.
 pub fn write_empty_i32_list(out: *mut AParcel) -> Result<(), BinderStatus> {
     write_i32(out, 0)
 }

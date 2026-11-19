@@ -1,17 +1,11 @@
-// AIDL for the OPlus RPMH (Result) enum.
+// Result enum for the OPlus RPMH HAL.
 //
-// Reconstructed from the shipped artifacts:
-//   erofs/vendor/lib64/vendor.oplus.hardware.rpmh-V1-ndk_platform.so
-//   erofs/system/system/framework/services.jar (vendor.oplus.hardware.rpmh.Result)
+// The backing type must be "int": the Result out-parameter is a 32-bit value on
+// the wire, while aidl defaults to "byte", which would change the parcel width
+// and corrupt the reply.
 //
-// The shipped sidecar serialises this enum with AParcel_writeInt32 and reads
-// it back with a 32-bit load (verified by disassembly of its onTransact), so
-// the backing type must be "int". aidl defaults to "byte", which would change
-// the parcel width and corrupt the out-parameter.
-//
-// The enum is a top-level type in package vendor.oplus.hardware.rpmh: the
-// framework's Java stub exposes it as vendor.oplus.hardware.rpmh.Result, a
-// separate class next to IRpmh, not a nested type.
+// The enum is a top-level type in package vendor.oplus.hardware.rpmh, next to
+// IRpmh.
 
 package vendor.oplus.hardware.rpmh;
 

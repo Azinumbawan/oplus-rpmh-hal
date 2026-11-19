@@ -1,25 +1,24 @@
 #!/bin/bash
-# Stage the Rust port of the OPlus Rpmh HAL into the unpacked vendor tree.
+# Stage the built HAL binary into an unpacked ROM tree.
 #
-# Staged:
-#   erofs/vendor/bin/hw/vendor.oplus.hardware.rpmh-V1-service
+# Staged path (relative to ROM_TREE):
+#   vendor/bin/hw/vendor.oplus.hardware.rpmh-V1-service
 #
-# The init rc
-# (erofs/vendor/etc/init/vendor.oplus.hardware.rpmh-V1-service.rc, class main,
-# user system, group system) and the VINTF fragment
-# (erofs/vendor/etc/vintf/manifest/manifest_rpmh_aidl.xml) point at this same
-# path and stay unchanged.
+# The init rc (vendor/etc/init/vendor.oplus.hardware.rpmh-V1-service.rc) and
+# the VINTF fragment (vendor/etc/vintf/manifest/manifest_rpmh_aidl.xml) that
+# reference this path are supplied by the target platform and are not touched.
 #
-# The binary lands at the same path as the build it replaces, so the existing
-# fs_config / file_contexts entries still apply and nothing is regenerated
-# (that only happens at repack time).
-#
-# This only touches files in the unpacked tree. It does NOT repack, does NOT
-# flash, and does NOT touch fs_config or file_contexts.
+# This script only installs the binary into the unpacked tree. It does not
+# repack an image, flash a device, or modify fs_config / file_contexts.
 set -euo pipefail
 
+ROM_TREE=${ROM_TREE:-}
+if [[ -z "$ROM_TREE" ]]; then
+    echo "set ROM_TREE to the root of the unpacked ROM tree" >&2
+    exit 1
+fi
+
 W=$(cd "$(dirname "$0")/.." && pwd)
-ROM_TREE=${ROM_TREE:-/mnt/project/RomTools/ROM_WORKDIR/oos/erofs}
 SRC="$W/rust/target/aarch64-linux-android/release/vendor.oplus.hardware.rpmh-V1-service"
 
 GRN=$'\033[32m'; RED=$'\033[31m'; NC=$'\033[0m'

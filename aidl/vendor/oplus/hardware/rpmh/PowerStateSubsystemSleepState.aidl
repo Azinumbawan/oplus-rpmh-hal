@@ -1,12 +1,7 @@
-// Parcelable for the OPlus RPMH HAL (V1).
+// Subsystem sleep-state parcelable for the OPlus RPMH HAL (V1).
 //
-// Reconstructed from the AIDL Java stub
-// system/system/framework/oplus-framework.jar:
-//   vendor.oplus.hardware.rpmh.PowerStateSubsystemSleepState
-//
-// Field order and types are taken verbatim from the generated
-// readFromParcel()/writeToParcel() in that stub, so the parcel layout matches
-// the shipped HAL byte for byte.
+// Field order and types define the parcel layout, so they are fixed by the
+// wire contract described alongside the interface.
 package vendor.oplus.hardware.rpmh;
 
 parcelable PowerStateSubsystemSleepState {

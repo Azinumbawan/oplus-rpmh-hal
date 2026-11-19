@@ -1,14 +1,9 @@
-// The Rpmh HAL core: the platform parsers, the subsystem sleep-state
-// adapters and the trigger-dump paths.
+// The Rpmh HAL core: platform parsers, subsystem sleep-state adapters and
+// trigger-dump paths.
 //
-// The shipped service picked a platform-specific parser from ro.hardware and
-// scraped that platform's kernel statistics file for per-subsystem sleep
-// states. This port keeps the dispatch and the Qualcomm / MT6985 parser
-// shapes, and adds the X6739 parser that feeds the only statistics source
-// this board actually publishes: the MediaTek SPM suspend counters. The other
-// subsystems (modem, connectivity) have no readable source on MT6893 and stay
-// UN_SUPPORTED, which is what the shipped MediaTek service reported for a
-// missing source too.
+// A parser is selected from ro.hardware and reads the corresponding kernel
+// statistics nodes. Subsystems with no readable source are reported as
+// UN_SUPPORTED.
 
 use crate::io_shim;
 
@@ -17,14 +12,13 @@ pub const RESULT_UN_SUPPORTED: i32 = -1;
 pub const RESULT_PERMISSION_DENIED: i32 = -2;
 pub const RESULT_OK: i32 = 0;
 
-/// The uid of a caller at or above which the shipped service refuses to
-/// answer (verified against the shipped binary: "if (uid < 0x3ea) ... else
-/// return -2"). system_server is uid 1000, so below the gate; vendor
-/// services at uid 1002 and above are refused.
+/// Callers at or above this uid are refused with PERMISSION_DENIED before any
+/// work. system_server (uid 1000) is below the gate; vendor services at uid
+/// 1002 and above are refused.
 pub const MAX_ALLOWED_UID_EXCLUSIVE: i32 = 1002;
 
 /// vendor.oplus.hardware.rpmh.PowerStateSubsystemSleepState. Only the fields
-/// the shipped parsers fill (name, transitions, residency) are ever non-zero;
+/// the parsers fill (name, transitions, residency) are ever non-zero;
 /// version, lastEntryTimestampMs and supportedOnlyInSuspend stay at their
 /// parcelable defaults.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -37,8 +31,8 @@ pub struct PowerStateSubsystemSleepState {
     pub supported_only_in_suspend: bool,
 }
 
-/// The subsystem names the shipped MediaTek parser declares and the framework
-/// polls for. Keeping the set visible matters: the framework's suspend ratio
+/// The subsystem names the platform parser declares and the framework polls
+/// for. Keeping the set visible matters: the framework's suspend ratio
 /// is computed over the subsystem list it receives.
 pub const SUBSYSTEMS: [&str; 7] = ["APSS", "MPSS", "VMIN", "CONNINFRA", "WIFI", "BT", "GPS"];
 
@@ -50,12 +44,11 @@ pub trait SubsystemStateParser {
 }
 
 // ---------------------------------------------------------------------------
-// Qualcomm parser (reference shape, kept for the non-X6739 branches)
+// Qualcomm parser (selected on Qualcomm platforms)
 // ---------------------------------------------------------------------------
 
 /// The Qualcomm parser reads /sys/power/rpmh_stats/master_stats for APSS and
-/// /sys/power/soc_sleep/stats for the island subsystems. Nothing of it exists
-/// on this board; the shape stays for parity with the shipped service.
+/// /sys/power/soc_sleep/stats for the island subsystems.
 pub struct QcomParser;
 
 impl SubsystemStateParser for QcomParser {
@@ -88,9 +81,9 @@ fn parse_stats_text(
     None
 }
 
-/// "<name> <transitions> <residency seconds>" as the Qualcomm and MT6985
-/// files lay it out, the residency converted to milliseconds the way the
-/// shipped code did (strtod(value) * 1000).
+/// "<name> <transitions> <residency seconds>" as the platform statistics
+/// files lay it out, with residency converted to milliseconds
+/// (strtod(value) * 1000).
 fn parse_stats_line(name: &str, line: &str) -> Option<PowerStateSubsystemSleepState> {
     let mut parts = line.split_whitespace();
     let _first = parts.next()?;
@@ -108,9 +101,8 @@ fn parse_stats_line(name: &str, line: &str) -> Option<PowerStateSubsystemSleepSt
 // MT6985 parser (reference shape)
 // ---------------------------------------------------------------------------
 
-/// The MT6985 parser reads /proc/mtk_lpm/spm/system_stat; that node does not
-/// exist on MT6893 (audited on the X6739: /proc/mtk_lpm/spm/ carries only
-/// debug flags). Kept for parity with the shipped service.
+/// The MT6985 parser reads /proc/mtk_lpm/spm/system_stat and the connectivity
+/// debug device.
 pub struct Mtk6985Parser;
 
 impl SubsystemStateParser for Mtk6985Parser {
@@ -131,10 +123,8 @@ impl SubsystemStateParser for Mtk6985Parser {
     }
 }
 
-/// The generic MediaTek parser of the shipped service: the OPlus connectivity
-/// statistics dump plus the wmt debug character device. Neither is reachable
-/// here (the character device is 0600 root and SELinux-blocked for the
-/// HAL's system uid), so this parser yields nothing.
+/// Generic MediaTek parser. When its connectivity statistics sources are not
+/// readable, it yields no subsystem states.
 pub struct MtkParser;
 
 impl SubsystemStateParser for MtkParser {
@@ -148,12 +138,10 @@ impl SubsystemStateParser for MtkParser {
 }
 
 // ---------------------------------------------------------------------------
-// X6739 / MT6893 parser (this port)
+// MediaTek SPM parser
 // ---------------------------------------------------------------------------
 
-/// The X6739 adapter. No Qualcomm rpmh and no MT6985 system_stat exist here,
-/// so APSS is fed from the closest readable source: the MediaTek SPM suspend
-/// counters.
+/// MediaTek SPM adapter. APSS is fed from the platform's SPM suspend counters:
 ///
 ///   totalTransitions        <- /proc/mtk_lpm/suspend/spm_sleep_count
 ///                              (fallback /sys/power/suspend_stats/success)
@@ -161,11 +149,7 @@ impl SubsystemStateParser for MtkParser {
 ///                              /sys/kernel/wakeup_reasons/last_suspend_time
 ///                              ("start end" in seconds, delta * 1000)
 ///
-/// The board does not publish a cumulative APSS residency, so the last
-/// suspend's duration stands in for it — the same shape, not the same
-/// accumulation. MPSS/VMIN and the connectivity subsystems have no readable
-/// source on MT6893 and report nothing, as the shipped MediaTek parser did
-/// when its source was missing.
+/// Subsystems with no readable source are omitted from the reported list.
 pub struct X6739Parser;
 
 impl X6739Parser {
@@ -220,7 +204,7 @@ impl SubsystemStateParser for X6739Parser {
     }
 }
 
-/// Chooses the parser the way the shipped service did, from ro.hardware.
+/// Selects a parser from the ro.hardware property.
 pub fn select_parser(hardware: &str) -> Box<dyn SubsystemStateParser> {
     if hardware.contains("qcom") {
         Box::new(QcomParser)
@@ -237,16 +221,16 @@ pub fn select_parser(hardware: &str) -> Box<dyn SubsystemStateParser> {
 // Trigger-dump paths
 // ---------------------------------------------------------------------------
 
-/// The shipped service gates the dump on either of the two trigger props
-/// (or the confidential-build flag), refuses everything otherwise.
+/// Trigger dumps are gated on either of the two trigger properties; requests
+/// without one are refused.
 pub fn support_trigger_dump() -> bool {
     ["sys.oplus.rpmh.trigger_dump", "persist.vendor.oplus.rpmh.trigger_dump"]
         .iter()
         .any(|p| io_shim::property_get(p).as_deref() == Some("true"))
 }
 
-/// Type 0: ADSP subsystem restart (Qualcomm-only path, absent on this board).
-/// Type 1: the MediaTek SCP watchdog reset, whose node exists on this kernel.
+/// Type 0: ADSP subsystem restart (Qualcomm-only path).
+/// Type 1: the MediaTek SCP watchdog reset.
 /// Type 2: the full kernel dump via sysrq.
 pub fn trigger_dump_type(dump_type: i32) -> i32 {
     if !support_trigger_dump() {
@@ -259,8 +243,8 @@ pub fn trigger_dump_type(dump_type: i32) -> i32 {
         _ => return dump_type,
     };
     let value = if dump_type == 2 { "c" } else { "1" };
-    // The shipped service returns 0 after the attempt regardless of whether
-    // the write itself succeeded.
+    // The service reports success after the attempt regardless of whether the
+    // write itself succeeded.
     let _ = io_shim::write_file(path, value);
     0
 }

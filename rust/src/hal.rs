@@ -1,7 +1,7 @@
 // The Rpmh HAL service: the onTransact dispatch for the three IRpmh methods
 // plus the reserved getInterfaceVersion / getInterfaceHash pair.
 //
-// Every handler keeps the shipped wire contract:
+// Every handler keeps the wire contract:
 //   * the binder status is always OK; failure is reported through the int32
 //     Result out-parameter (Result::UN_SUPPORTED / PERMISSION_DENIED),
 //   * a caller at or above uid 1002 is refused before any work,
@@ -120,14 +120,14 @@ pub unsafe extern "C" fn on_transact(
     }
 }
 
-/// The shipped service holds no per-binder state, so the single instance is
+/// The service holds no per-binder state, so the single instance is
 /// reachable through AIBinder_getUserData.
 unsafe fn service_of(binder: *mut AIBinder) -> &'static Service {
     let ptr = AIBinder_getUserData(binder);
     &*(ptr as *const Service)
 }
 
-/// The shipped service compared the binder calling uid against 1002 and only
+/// The service compares the binder calling uid against 1002 and only
 /// answered below it (root 0 and system 1000 pass; vendor processes at 1002
 /// and above are refused).
 fn uid_allowed() -> bool {
