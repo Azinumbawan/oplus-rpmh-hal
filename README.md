@@ -1,9 +1,13 @@
 # OplusRpmh
 
-A pure-Rust implementation of the OPlus RPMH AIDL HAL
-(`vendor.oplus.hardware.rpmh.IRpmh` V1).
+A pure-Rust implementation of the OPlus RPMH (Resource Power Manager Hardened)
+AIDL HAL (`vendor.oplus.hardware.rpmh.IRpmh` V1).
 
 ## What it does
+
+Functionally, RPMH is the sleep-state telemetry source. The framework asks it
+how long each subsystem has slept and how many times it entered sleep, which
+feeds the platform's power statistics and idle-state reporting.
 
 The service reports subsystem sleep-state information over AIDL. It registers
 `vendor.oplus.hardware.rpmh.IRpmh/default`, answers per-subsystem queries with
