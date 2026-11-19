@@ -29,7 +29,7 @@ the crate contains no C or C++ sources and no generated backend library.
 
 ## Prebuilt
 
-[Get Prebuilt](https://github.com/Xia-s-Projekt/oplus-rpmh-hal/releases/latest) — prebuilt AArch64 service binary.
+[Get Prebuilt](https://github.com/Xia-s-Projekt/oplus-rpmh-hal/releases/latest) — AArch64 ODM archive containing the service under `odm/bin/hw/`, its init rc under `odm/etc/init/`, and the VINTF manifest under `odm/etc/vintf/manifest/`.
 
 ## Build
 
