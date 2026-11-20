@@ -1,111 +1,48 @@
-# OplusRpmh Sleep Statistics
+# Oplus RPMh HAL
 
-A conservative Rust implementation of the Oplus subsystem sleep-statistics
-interface `vendor.oplus.hardware.rpmh.IRpmh/default`. This is not Qualcomm
-hardware RPMh resource voting/control and does not require Qualcomm RPMh drivers.
+Rust compatibility implementation of `vendor.oplus.hardware.rpmh.IRpmh/default`, based on the reverse-engineered Oplus HAL in [Xia-s-Projekt/oplus-rpmh-hal](https://github.com/Xia-s-Projekt/oplus-rpmh-hal).
 
-## Contract
+The interface is V1, hash `acf5f9a3960fb9a2f76f86947dff5ca9e0c86e05`. It reports subsystem sleep statistics; it does not implement Qualcomm RPMh resource voting or supply missing hardware drivers. This is independent software, not official Oplus source.
 
-- Interface version **1**, hash `acf5f9a3960fb9a2f76f86947dff5ca9e0c86e05`.
-- Transactions 1/2 query one state/the state list; transaction 3 is dump type.
-- Replies are **status, return Result, then out state/list**, matching the
-  checked donor Proxy. Failed queries still serialize the required default
-  state or empty list, but with an explicit non-OK Result.
-- Parcelable order is `name`, `version`, `residencyInMsecSinceBoot`,
-  `totalTransitions`, `lastEntryTimestampMs`, `supportedOnlyInSuspend`.
-  The non-null marker and bounded size header precede each state, including
-  list elements; the four numeric state fields are signed 64-bit and bool is
-  encoded as int32.
-- Unknown transactions return NDK `STATUS_UNKNOWN_TRANSACTION` (`-74`).
-  Null non-nullable names, malformed/oversized strings and trailing data are
-  rejected before telemetry access. UTF-16 transport conversion is performed
-  by libbinder_ndk, not a raw UTF-8 parcel implementation.
-- AIDL types and the created binder are explicitly VINTF-stable. This remains
-  manual transport, not a regenerated frozen API; original annotation recovery
-  from Java type descriptors alone is not claimed.
+## Status
 
-## Accurate Data Policy
+**No hardware statistics backend is enabled by default.** Requests return `UN_SUPPORTED` until a complete native counter source has been verified. An unsupported query is not reported as a successful empty result.
 
-**No cumulative backend is enabled by default.** On the inspected CK8n,
-`/proc/mtk_lpm/suspend/spm_sleep_count` is 5 while
-`/sys/power/suspend_stats/success` is 6. These are not interchangeable counters.
-`/sys/kernel/wakeup_reasons/last_suspend_time` reports awake suspend/resume
-overhead followed by last sleep duration, not start/end times. Its second field
-is not cumulative since boot. Neither source is used to invent residency.
+A backend must provide cumulative residency since boot, transition counts and a last-entry timestamp with documented units and clock epoch. A last-suspend duration or a counter accumulated only since daemon startup is not an equivalent replacement.
 
-The reviewed native-source table in `core::verified_source` is empty until a
-real driver contract is established. Queries therefore return `UN_SUPPORTED`,
-including the empty list; no MPSS/VMIN/connectivity data is synthesized.
-There is no since-daemon-start accumulator and no claim to have observed every
-suspend from boot count zero.
+The native-counter adapter validates bounds, units, clock ranges, counter regression and snapshot consistency. It does not synthesize missing subsystem data. Crash, watchdog-reset and subsystem-restart dump operations are disabled.
 
-A future reviewed `CounterSource` must identify exact read-only native paths for
-transition count, **complete cumulative since-boot** residency, and last-entry
-timestamp on the **CLOCK_BOOTTIME** epoch. It must document each native unit,
-version/suspend-only meaning and whether counters can reset. Caller-selected
-paths and guessed tick frequencies are not supported. This backend:
+## Interface
 
-- Parses whole unsigned decimal or hexadecimal integers; negative, malformed,
-  nonfinite and overflowing data is not converted to zero.
-- Converts explicitly declared ns/us/ms/seconds/ticks using checked integer
-  arithmetic, truncating fractional milliseconds. Tick frequency must be nonzero.
-- Reads count before/after a snapshot, retries at most twice on updates, and
-  refuses incoherent data instead of mixing epochs.
-- Checks residency and entry timestamp against real BOOTTIME, count-zero
-  consistency and signed AIDL field limits.
-- Detects regressions in raw counters and boot clock; a reset/wrap latches
-  `INVALID_OPERATION`. No guessed rollover extension or new baseline is reported
-  as a complete boot total. A driver reset while the daemon was absent cannot be
-  detected from one snapshot; only an independently verified monotonic-from-boot
-  driver contract can establish completeness.
-- Distinguishes missing/unverified data (`UN_SUPPORTED`), invalid data
-  (`BAD_VALUE`), reset/incoherence (`INVALID_OPERATION`) and caller denial.
+Replies preserve AIDL ordering: status, returned `Result`, then OUT state or list. Sleep-state fields are `name`, `version`, `residencyInMsecSinceBoot`, `totalTransitions`, `lastEntryTimestampMs` and `supportedOnlyInSuspend`.
 
-Count bracketing is valid only with a verified driver publication protocol that
-makes both values coherent with that count. It cannot make independently updated
-nodes atomic; an appropriate native snapshot/sequence facility may be required.
+The service explicitly marks its Binder VINTF-stable and rejects malformed, oversized or trailing input. Root or system Binder identity is required for telemetry queries. Actual SELinux and linker integration remains device-specific.
 
-Only Binder UIDs 0 and 1000 may obtain telemetry. SELinux/DAC access to actual
-native counters and the correctness of a future profile require platform review.
-Missing Oplus paths normally call for verified userspace telemetry mapping; kernel
-work is justified only if the required real counters are genuinely unavailable.
+## Build
 
-## No Crash Or Reset Dump
+Requirements: installed Rust 1.95 or newer, the Android ARM64 target, Android NDK, and the target platform's actual Binder library. The default cross-build API is 35.
 
-`triggerDumpType` always returns `UN_SUPPORTED`, for every caller/type/property
-combination. ADSP restart, SCP watchdog reset and sysrq panic implementations have
-been removed, not merely hidden behind a property gate. No node writer exists.
-This service does not provide a supposedly safe diagnostic dump by triggering a
-kernel/subsystem reset.
-
-## Host Tests
-
-From `rust/`, with already installed stable Rust 1.95 or newer:
-
-```powershell
-rustup run stable cargo test --offline --lib --target-dir "C:\Users\Azareel\AppData\Local\Temp\kilo\oplus-rpmh-host-tests"
+```sh
+export ANDROID_NDK_HOME=/path/to/android-ndk
+export LIBBINDER_NDK=/path/to/platform/lib64/libbinder_ndk.so
+bash scripts/build_rust.sh
 ```
 
-Node/property/clock fixtures are thread-local in memory. Tests cover unsupported
-CK8n inputs, complete native snapshots, unit/range/reset behavior and the same
-reply encoder used by production. They do not run HALs/Binder, open host/device
-nodes, create Unix symlinks or perform crash/reset writes. Android Binder
-integration and actual hardware telemetry remain separately untested.
+`OPLUS_PLATFORM_LIB_DIR` may supply the platform library directory instead. Building does not run the HAL or install anything on a device.
 
-## Android Build And Deployment
+## Tests
 
-An existing Android Rust target/NDK compiler and actual target-platform
-`libbinder_ndk.so` are required. `build.rs` accepts `LIBBINDER_NDK` (full path) or
-`OPLUS_PLATFORM_LIB_DIR` (platform lib64 directory) and links the exact library,
-not the NDK public stub. API35 is the default cross-link target; runtime manager,
-process, VINTF and parcel-size APIs require the real platform library (API31+).
-Windows callers may set `CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER` to their
-installed NDK clang `.cmd`. No toolchain/target is automatically installed.
+```sh
+cargo +stable test --manifest-path rust/Cargo.toml --lib --locked
+cargo +stable clippy --manifest-path rust/Cargo.toml --lib -- -D warnings
+```
 
-`scripts/build_rust.sh` uses `ANDROID_NDK_HOME`, `LIBBINDER_NDK` and optional
-`NDK_HOST_TAG`/`RUST_TOOLCHAIN`/`CARGO_TARGET_DIR`, runs host library tests and
-cross-builds `vendor.oplus.hardware.rpmh-V1-service`; it never executes it.
-The staging helper requires `ROM_TREE` and an explicit reviewed
-`RPMH_RELATIVE_EXECUTABLE` under `vendor/bin/hw/` or `odm/bin/hw/`.
-`RPMH_ARTIFACT` can select an external artifact. No rc/manifest/policy/image is
-generated or modified. Historical upstream prebuilts do not contain these fixes.
+Tests use in-memory telemetry and clock fixtures. They cover reply ordering, invalid data, unit conversion and resets, but not live Binder or hardware behavior.
+
+## Integration
+
+Provide the appropriate init service, V1 VINTF declaration, service labels and read-only counter permissions. Keep reset and crash controls unavailable. The optional staging helper copies only to an explicitly selected, reviewed ROM-tree destination; it does not supply policy, repack images or flash a device.
+
+## Attribution
+
+Initial reverse-engineering and implementation are by Xia-s-Projekt and its contributors. This fork corrects protocol handling and limits reporting to verified telemetry. Existing copyright and license notices remain applicable.
