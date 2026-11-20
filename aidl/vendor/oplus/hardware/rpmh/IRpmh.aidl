@@ -11,6 +11,7 @@ package vendor.oplus.hardware.rpmh;
 import vendor.oplus.hardware.rpmh.PowerStateSubsystemSleepState;
 import vendor.oplus.hardware.rpmh.Result;
 
+@VintfStability
 interface IRpmh {
     Result getPowerStateSubsystemSleepState(String name, out PowerStateSubsystemSleepState subsystem);
     Result getPowerStateSubsystemSleepStateList(out List<PowerStateSubsystemSleepState> subsystemList);

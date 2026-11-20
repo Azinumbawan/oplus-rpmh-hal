@@ -1,26 +1,33 @@
-// The Rpmh HAL core: platform parsers, subsystem sleep-state adapters and
-// trigger-dump paths.
-//
-// A parser is selected from ro.hardware and reads the corresponding kernel
-// statistics nodes. Subsystems with no readable source are reported as
-// UN_SUPPORTED.
+// Only complete native since-boot counters may back IRpmh residency.
+// A last-suspend duration or a daemon-start accumulator is not such a counter.
 
 use crate::io_shim;
+use std::sync::Mutex;
 
-/// vendor.oplus.hardware.rpmh.Result
 pub const RESULT_UN_SUPPORTED: i32 = -1;
 pub const RESULT_PERMISSION_DENIED: i32 = -2;
+pub const RESULT_BAD_VALUE: i32 = -3;
+pub const RESULT_INVALID_OPERATION: i32 = -4;
 pub const RESULT_OK: i32 = 0;
 
-/// Callers at or above this uid are refused with PERMISSION_DENIED before any
-/// work. system_server (uid 1000) is below the gate; vendor services at uid
-/// 1002 and above are refused.
-pub const MAX_ALLOWED_UID_EXCLUSIVE: i32 = 1002;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Error {
+    Unsupported,
+    PermissionDenied,
+    BadValue,
+    InvalidOperation,
+}
+impl Error {
+    pub fn result(self) -> i32 {
+        match self {
+            Self::Unsupported => RESULT_UN_SUPPORTED,
+            Self::PermissionDenied => RESULT_PERMISSION_DENIED,
+            Self::BadValue => RESULT_BAD_VALUE,
+            Self::InvalidOperation => RESULT_INVALID_OPERATION,
+        }
+    }
+}
 
-/// vendor.oplus.hardware.rpmh.PowerStateSubsystemSleepState. Only the fields
-/// the parsers fill (name, transitions, residency) are ever non-zero;
-/// version, lastEntryTimestampMs and supportedOnlyInSuspend stay at their
-/// parcelable defaults.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PowerStateSubsystemSleepState {
     pub name: String,
@@ -31,337 +38,370 @@ pub struct PowerStateSubsystemSleepState {
     pub supported_only_in_suspend: bool,
 }
 
-/// The subsystem names the platform parser declares and the framework polls
-/// for. Keeping the set visible matters: the framework's suspend ratio
-/// is computed over the subsystem list it receives.
-pub const SUBSYSTEMS: [&str; 7] = ["APSS", "MPSS", "VMIN", "CONNINFRA", "WIFI", "BT", "GPS"];
-
-/// Parses the sleep/residency statistics for one subsystem. Returns None
-/// when no source yields data for it.
-pub trait SubsystemStateParser {
-    fn parse_subsystem_sleep_state(&self, name: &str) -> Option<PowerStateSubsystemSleepState>;
-    fn support_connectivity_subsys(&self) -> bool;
+#[derive(Debug, Clone, Copy)]
+pub enum Unit {
+    Nanoseconds,
+    Microseconds,
+    Milliseconds,
+    Seconds,
+    Ticks(u64),
 }
-
-// ---------------------------------------------------------------------------
-// Qualcomm parser (selected on Qualcomm platforms)
-// ---------------------------------------------------------------------------
-
-/// The Qualcomm parser reads /sys/power/rpmh_stats/master_stats for APSS and
-/// /sys/power/soc_sleep/stats for the island subsystems.
-pub struct QcomParser;
-
-impl SubsystemStateParser for QcomParser {
-    fn parse_subsystem_sleep_state(&self, name: &str) -> Option<PowerStateSubsystemSleepState> {
-        let file = match name {
-            "APSS" => "/sys/power/rpmh_stats/master_stats",
-            "SLPI_ISLAND" | "ADSP_ISLAND" => "/sys/power/soc_sleep/stats",
-            _ => return None,
+impl Unit {
+    pub fn milliseconds(self, value: u64) -> Result<i64, Error> {
+        let value = u128::from(value);
+        let converted = match self {
+            Self::Nanoseconds => value / 1_000_000,
+            Self::Microseconds => value / 1000,
+            Self::Milliseconds => value,
+            Self::Seconds => value * 1000,
+            Self::Ticks(0) => return Err(Error::BadValue),
+            Self::Ticks(frequency) => value * 1000 / u128::from(frequency),
         };
-        parse_stats_text(name, file, &[])
-    }
-
-    fn support_connectivity_subsys(&self) -> bool {
-        false
+        i64::try_from(converted).map_err(|_| Error::BadValue)
     }
 }
 
-fn parse_stats_text(
-    name: &str,
-    file: &str,
-    keywords: &[&str],
-) -> Option<PowerStateSubsystemSleepState> {
-    let content = io_shim::read_file(file)?;
-    for line in content.lines() {
-        if !line.contains(name) && !keywords.iter().any(|k| !k.is_empty() && line.contains(k)) {
-            continue;
-        }
-        return parse_stats_line(name, line);
+pub fn unsigned_counter(text: &str) -> Result<u64, Error> {
+    let text = text.trim();
+    let (digits, radix) = match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+        Some(digits) => (digits, 16),
+        None => (text, 10),
+    };
+    if digits.is_empty()
+        || !digits.bytes().all(|b| {
+            if radix == 16 {
+                b.is_ascii_hexdigit()
+            } else {
+                b.is_ascii_digit()
+            }
+        })
+    {
+        return Err(Error::BadValue);
     }
+    u64::from_str_radix(digits, radix).map_err(|_| Error::BadValue)
+}
+
+// A profile is a reviewed driver contract, never a caller-selected path.
+// All three counters must be monotonic from this boot; last_entry is BOOTTIME.
+// The driver's count publication must also bracket coherent updates of both
+// values; rereading independent counters cannot create an atomic snapshot.
+#[derive(Clone, Copy)]
+pub struct CounterSource {
+    pub count_path: &'static str,
+    pub residency_path: &'static str,
+    pub last_entry_path: &'static str,
+    pub residency_unit: Unit,
+    pub timestamp_unit: Unit,
+    pub version: i64,
+    pub supported_only_in_suspend: bool,
+    pub complete_since_boot: bool,
+}
+
+pub fn verified_source(_hardware: &str) -> Option<CounterSource> {
+    // CK8n exposes a count and last_suspend_time, but no verified cumulative
+    // residency/last-entry source. Do not substitute suspend_stats/success.
     None
 }
 
-/// "<name> <transitions> <residency seconds>" as the platform statistics
-/// files lay it out, with residency converted to milliseconds
-/// (strtod(value) * 1000).
-fn parse_stats_line(name: &str, line: &str) -> Option<PowerStateSubsystemSleepState> {
-    let mut parts = line.split_whitespace();
-    let _first = parts.next()?;
-    let transitions: i64 = parts.next()?.parse().ok()?;
-    let residency_seconds: f64 = parts.next()?.parse().ok()?;
-    Some(PowerStateSubsystemSleepState {
-        name: name.to_string(),
-        total_transitions: transitions,
-        residency_in_msec_since_boot: (residency_seconds * 1000.0) as i64,
-        ..Default::default()
-    })
+#[derive(Clone, Copy)]
+struct Sample {
+    count: i64,
+    residency: i64,
+    entry: i64,
+    boot: i64,
+    raw_residency: u64,
+    raw_entry: u64,
+}
+#[derive(Default)]
+struct History {
+    previous: Option<Sample>,
+    reset: bool,
 }
 
-// ---------------------------------------------------------------------------
-// MT6985 parser (reference shape)
-// ---------------------------------------------------------------------------
-
-/// The MT6985 parser reads /proc/mtk_lpm/spm/system_stat and the connectivity
-/// debug device.
-pub struct Mtk6985Parser;
-
-impl SubsystemStateParser for Mtk6985Parser {
-    fn parse_subsystem_sleep_state(&self, name: &str) -> Option<PowerStateSubsystemSleepState> {
-        match name {
-            "APSS" | "MPSS" | "VMIN" => parse_stats_text(
-                name,
-                "/proc/mtk_lpm/spm/system_stat",
-                &["Suspend AP", "Suspend 26M"],
-            ),
-            "CONNINFRA" | "WIFI" | "BT" | "GPS" => parse_stats_text(name, "/dev/conn_dbg_dev", &[]),
-            _ => None,
+pub struct Statistics {
+    source: Option<CounterSource>,
+    history: Mutex<History>,
+}
+impl Statistics {
+    pub fn new(source: Option<CounterSource>) -> Self {
+        Self {
+            source,
+            history: Mutex::new(History::default()),
         }
     }
 
-    fn support_connectivity_subsys(&self) -> bool {
-        true
-    }
-}
-
-/// Generic MediaTek parser. When its connectivity statistics sources are not
-/// readable, it yields no subsystem states.
-pub struct MtkParser;
-
-impl SubsystemStateParser for MtkParser {
-    fn parse_subsystem_sleep_state(&self, _name: &str) -> Option<PowerStateSubsystemSleepState> {
-        None
-    }
-
-    fn support_connectivity_subsys(&self) -> bool {
-        true
-    }
-}
-
-// ---------------------------------------------------------------------------
-// MediaTek SPM parser
-// ---------------------------------------------------------------------------
-
-/// MediaTek SPM adapter. APSS is fed from the platform's SPM suspend counters:
-///
-///   totalTransitions        <- /proc/mtk_lpm/suspend/spm_sleep_count
-///                              (fallback /sys/power/suspend_stats/success)
-///   residencyInMsecSinceBoot<- the last suspend duration read out of
-///                              /sys/kernel/wakeup_reasons/last_suspend_time
-///                              ("start end" in seconds, delta * 1000)
-///
-/// Subsystems with no readable source are omitted from the reported list.
-pub struct X6739Parser;
-
-impl X6739Parser {
-    pub fn new() -> Self {
-        X6739Parser
-    }
-
-    /// "0.000000000 0.000000000" -> 0 ms; "12.5 14.5" -> 2000 ms.
-    fn last_suspend_ms(&self) -> i64 {
-        let text = match io_shim::read_file("/sys/kernel/wakeup_reasons/last_suspend_time") {
-            Some(t) => t,
-            None => return 0,
+    pub fn get(&self, uid: u32, name: &str) -> Result<PowerStateSubsystemSleepState, Error> {
+        if !matches!(uid, 0 | 1000) {
+            return Err(Error::PermissionDenied);
+        }
+        if name.len() > 32 || name.chars().any(char::is_control) {
+            return Err(Error::BadValue);
+        }
+        if name != "APSS" {
+            return Err(Error::Unsupported);
+        }
+        let source = self
+            .source
+            .filter(|s| s.complete_since_boot && s.version >= 0)
+            .ok_or(Error::Unsupported)?;
+        let mut history = self.history.lock().map_err(|_| Error::InvalidOperation)?;
+        if history.reset {
+            return Err(Error::InvalidOperation);
+        }
+        let read = |path| {
+            io_shim::read_file(path, 128)
+                .map_err(|e| match e {
+                    io_shim::ReadError::Unavailable => Error::Unsupported,
+                    io_shim::ReadError::InvalidData => Error::BadValue,
+                })
+                .and_then(|s| unsigned_counter(&s))
         };
-        let mut parts = text.split_whitespace();
-        let start: f64 = match parts.next().and_then(|s| s.parse().ok()) {
-            Some(v) => v,
-            None => return 0,
-        };
-        let end: f64 = match parts.next().and_then(|s| s.parse().ok()) {
-            Some(v) => v,
-            None => return 0,
-        };
-        ((end - start) * 1000.0) as i64
-    }
-
-    fn apss(&self) -> Option<PowerStateSubsystemSleepState> {
-        let transitions = io_shim::read_file("/proc/mtk_lpm/suspend/spm_sleep_count")
-            .and_then(|s| s.trim().parse::<i64>().ok())
-            .or_else(|| {
-                io_shim::read_file("/sys/power/suspend_stats/success")
-                    .and_then(|s| s.trim().parse::<i64>().ok())
-            })?;
-        Some(PowerStateSubsystemSleepState {
-            name: "APSS".to_string(),
-            total_transitions: transitions,
-            residency_in_msec_since_boot: self.last_suspend_ms(),
-            ..Default::default()
+        let mut snapshot = None;
+        // A counter update during reads is retried, never combined with an old duration.
+        for _ in 0..2 {
+            let before = read(source.count_path)?;
+            let raw_residency = read(source.residency_path)?;
+            let raw_entry = read(source.last_entry_path)?;
+            let residency = source.residency_unit.milliseconds(raw_residency)?;
+            let entry = source.timestamp_unit.milliseconds(raw_entry)?;
+            let after = read(source.count_path)?;
+            if after < before {
+                history.reset = true;
+                return Err(Error::InvalidOperation);
+            }
+            if before != after {
+                continue;
+            }
+            let count = i64::try_from(after).map_err(|_| Error::BadValue)?;
+            let boot = io_shim::boot_time_ms()
+                .filter(|t| *t >= 0)
+                .ok_or(Error::Unsupported)?;
+            if residency > boot
+                || entry > boot
+                || (count == 0 && (raw_residency != 0 || raw_entry != 0))
+                || (count > 0 && raw_entry == 0)
+            {
+                return Err(Error::BadValue);
+            }
+            snapshot = Some(Sample {
+                count,
+                residency,
+                entry,
+                boot,
+                raw_residency,
+                raw_entry,
+            });
+            break;
+        }
+        let current = snapshot.ok_or(Error::InvalidOperation)?;
+        if let Some(previous) = history.previous {
+            if current.count < previous.count
+                || current.raw_residency < previous.raw_residency
+                || current.raw_entry < previous.raw_entry
+                || current.boot < previous.boot
+            {
+                // Unknown counter width/epoch: guessing wrap extension would fabricate totals.
+                history.reset = true;
+                return Err(Error::InvalidOperation);
+            }
+            if current.count == previous.count && current.raw_entry != previous.raw_entry {
+                return Err(Error::InvalidOperation);
+            }
+        }
+        history.previous = Some(current);
+        Ok(PowerStateSubsystemSleepState {
+            name: "APSS".to_owned(),
+            version: source.version,
+            residency_in_msec_since_boot: current.residency,
+            total_transitions: current.count,
+            last_entry_timestamp_ms: current.entry,
+            supported_only_in_suspend: source.supported_only_in_suspend,
         })
     }
-}
 
-impl SubsystemStateParser for X6739Parser {
-    fn parse_subsystem_sleep_state(&self, name: &str) -> Option<PowerStateSubsystemSleepState> {
-        if name == "APSS" {
-            return self.apss();
-        }
-        None
-    }
-
-    fn support_connectivity_subsys(&self) -> bool {
-        false
+    pub fn list(&self, uid: u32) -> Result<Vec<PowerStateSubsystemSleepState>, Error> {
+        self.get(uid, "APSS").map(|s| vec![s])
     }
 }
 
-/// Selects a parser from the ro.hardware property.
-pub fn select_parser(hardware: &str) -> Box<dyn SubsystemStateParser> {
-    if hardware.contains("qcom") {
-        Box::new(QcomParser)
-    } else if hardware.contains("mt6985") {
-        Box::new(Mtk6985Parser)
-    } else if hardware.contains("mt6893") {
-        Box::new(X6739Parser::new())
-    } else {
-        Box::new(MtkParser)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Trigger-dump paths
-// ---------------------------------------------------------------------------
-
-/// Trigger dumps are gated on either of the two trigger properties; requests
-/// without one are refused.
-pub fn support_trigger_dump() -> bool {
-    ["sys.oplus.rpmh.trigger_dump", "persist.vendor.oplus.rpmh.trigger_dump"]
-        .iter()
-        .any(|p| io_shim::property_get(p).as_deref() == Some("true"))
-}
-
-/// Type 0: ADSP subsystem restart (Qualcomm-only path).
-/// Type 1: the MediaTek SCP watchdog reset.
-/// Type 2: the full kernel dump via sysrq.
-pub fn trigger_dump_type(dump_type: i32) -> i32 {
-    if !support_trigger_dump() {
-        return RESULT_UN_SUPPORTED;
-    }
-    let path = match dump_type {
-        0 => "/sys/kernel/boot_adsp/ssr",
-        1 => "/sys/class/misc/scp/wdt_reset",
-        2 => "/proc/sysrq-trigger",
-        _ => return dump_type,
-    };
-    let value = if dump_type == 2 { "c" } else { "1" };
-    // The service reports success after the attempt regardless of whether the
-    // write itself succeeded.
-    let _ = io_shim::write_file(path, value);
-    0
+// There is intentionally no crash/reset implementation or property opt-in.
+pub fn trigger_dump_type(_kind: i32) -> i32 {
+    RESULT_UN_SUPPORTED
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use std::path::PathBuf;
-
-    fn setup(name: &str) -> (PathBuf, std::sync::MutexGuard<'static, ()>) {
-        let guard = io_shim::test_lock();
-        let root = format!("/tmp/opencode/rpmh_fixture_{}", name);
-        let _ = fs::remove_dir_all(&root);
-        for d in [
-            "proc/mtk_lpm/suspend",
-            "sys/power/suspend_stats",
-            "sys/kernel/wakeup_reasons",
-            "sys/class/misc/scp",
-        ] {
-            fs::create_dir_all(format!("{}/{}", root, d)).unwrap();
+    fn source() -> CounterSource {
+        CounterSource {
+            count_path: "/mock/count",
+            residency_path: "/mock/residency",
+            last_entry_path: "/mock/entry",
+            residency_unit: Unit::Microseconds,
+            timestamp_unit: Unit::Milliseconds,
+            version: 1,
+            supported_only_in_suspend: true,
+            complete_since_boot: true,
         }
-        io_shim::set_test_root(&root);
-        (PathBuf::from(root), guard)
     }
-
-    fn teardown(root: &PathBuf) {
-        io_shim::clear_test_root();
-        let _ = fs::remove_dir_all(root);
-    }
-
-    fn w(root: &PathBuf, rel: &str, v: &str) {
-        fs::write(format!("{}/{}", root.display(), rel), v).unwrap();
+    fn sample(count: &str, residency: &str, entry: &str, boot: i64) {
+        io_shim::mock_file("/mock/count", count);
+        io_shim::mock_file("/mock/residency", residency);
+        io_shim::mock_file("/mock/entry", entry);
+        io_shim::mock_clock(boot);
     }
 
     #[test]
-    fn x6739_apss_reads_spm_sleep_count() {
-        let (r, _g) = setup("apss");
-        let p = X6739Parser::new();
-        assert!(p.parse_subsystem_sleep_state("APSS").is_none());
-        w(&r, "proc/mtk_lpm/suspend/spm_sleep_count", "3\n");
-        let s = p.parse_subsystem_sleep_state("APSS").unwrap();
-        assert_eq!(s.name, "APSS");
-        assert_eq!(s.total_transitions, 3);
-        assert_eq!(s.residency_in_msec_since_boot, 0);
-        teardown(&r);
-    }
-
-    #[test]
-    fn x6739_apss_falls_back_to_pm_suspend_stats() {
-        let (r, _g) = setup("apss_fallback");
-        w(&r, "sys/power/suspend_stats/success", "5\n");
-        let p = X6739Parser::new();
-        let s = p.parse_subsystem_sleep_state("APSS").unwrap();
-        assert_eq!(s.total_transitions, 5);
-        teardown(&r);
-    }
-
-    #[test]
-    fn x6739_apss_residency_from_last_suspend_time() {
-        let (r, _g) = setup("apss_residency");
-        w(&r, "proc/mtk_lpm/suspend/spm_sleep_count", "1\n");
-        w(
-            &r,
-            "sys/kernel/wakeup_reasons/last_suspend_time",
-            "100.000000000 102.500000000\n",
+    fn ck8n_count_and_last_sleep_do_not_become_boot_totals() {
+        io_shim::mock_file("/proc/mtk_lpm/suspend/spm_sleep_count", "5");
+        io_shim::mock_file("/sys/power/suspend_stats/success", "6");
+        io_shim::mock_file(
+            "/sys/kernel/wakeup_reasons/last_suspend_time",
+            "0.118588462 0.254318922",
         );
-        let p = X6739Parser::new();
-        let s = p.parse_subsystem_sleep_state("APSS").unwrap();
-        assert_eq!(s.residency_in_msec_since_boot, 2500);
-        teardown(&r);
+        let stats = Statistics::new(verified_source("mt6893"));
+        assert_eq!(stats.get(1000, "APSS"), Err(Error::Unsupported));
+        assert_eq!(stats.list(1000), Err(Error::Unsupported));
+        assert!(io_shim::mock_reads().is_empty());
     }
 
     #[test]
-    fn x6739_unsupported_subsystems_yield_none() {
-        let (r, _g) = setup("unsupported");
-        let p = X6739Parser::new();
-        for n in ["MPSS", "VMIN", "CONNINFRA", "WIFI", "BT", "GPS", "ADSP"] {
-            assert!(p.parse_subsystem_sleep_state(n).is_none(), "{}", n);
+    fn complete_native_counters_convert_units_without_accumulating() {
+        sample("0x5", "254318", "1000", 5000);
+        let stats = Statistics::new(Some(source()));
+        let first = stats.get(1000, "APSS").unwrap();
+        assert_eq!(
+            (
+                first.total_transitions,
+                first.residency_in_msec_since_boot,
+                first.last_entry_timestamp_ms
+            ),
+            (5, 254, 1000)
+        );
+        sample("6", "300000", "1500", 6000);
+        assert_eq!(
+            stats
+                .get(1000, "APSS")
+                .unwrap()
+                .residency_in_msec_since_boot,
+            300
+        );
+        assert_eq!(
+            stats
+                .get(1000, "APSS")
+                .unwrap()
+                .residency_in_msec_since_boot,
+            300
+        );
+    }
+
+    #[test]
+    fn rejects_partial_sources_bad_timestamps_and_incomplete_epoch() {
+        let stats = Statistics::new(Some(source()));
+        assert_eq!(stats.get(1000, "APSS"), Err(Error::Unsupported));
+        sample("5", "254318", "6001", 6000);
+        assert_eq!(stats.get(1000, "APSS"), Err(Error::BadValue));
+        sample("0", "1", "1", 6000);
+        assert_eq!(stats.get(1000, "APSS"), Err(Error::BadValue));
+        let mut incomplete = source();
+        incomplete.complete_since_boot = false;
+        assert_eq!(
+            Statistics::new(Some(incomplete)).get(1000, "APSS"),
+            Err(Error::Unsupported)
+        );
+    }
+
+    #[test]
+    fn counter_reset_or_wrap_invalidates_future_snapshots() {
+        sample("5", "254318", "1000", 5000);
+        let stats = Statistics::new(Some(source()));
+        assert!(stats.get(1000, "APSS").is_ok());
+        sample("1", "1000", "2000", 6000);
+        assert_eq!(stats.get(1000, "APSS"), Err(Error::InvalidOperation));
+        sample("10", "500000", "3000", 7000);
+        assert_eq!(stats.get(1000, "APSS"), Err(Error::InvalidOperation));
+    }
+
+    #[test]
+    fn raw_submillisecond_regressions_and_zero_count_are_checked() {
+        sample("5", "254999", "1000", 5000);
+        let stats = Statistics::new(Some(source()));
+        assert!(stats.get(1000, "APSS").is_ok());
+        sample("5", "254998", "1000", 6000);
+        assert_eq!(stats.get(1000, "APSS"), Err(Error::InvalidOperation));
+        sample("0", "1", "0", 6000);
+        assert_eq!(
+            Statistics::new(Some(source())).get(1000, "APSS"),
+            Err(Error::BadValue)
+        );
+    }
+
+    #[test]
+    fn count_bracketing_retries_updates_but_rejects_resets_and_churn() {
+        sample("6", "300000", "1500", 5000);
+        io_shim::mock_sequence("/mock/count", &["5", "6", "6", "6"]);
+        let stats = Statistics::new(Some(source()));
+        assert_eq!(stats.get(1000, "APSS").unwrap().total_transitions, 6);
+        io_shim::mock_sequence("/mock/count", &["6", "7", "8", "9"]);
+        assert_eq!(stats.get(1000, "APSS"), Err(Error::InvalidOperation));
+        io_shim::mock_sequence("/mock/count", &["9", "8"]);
+        assert_eq!(stats.get(1000, "APSS"), Err(Error::InvalidOperation));
+        sample("10", "400000", "2000", 6000);
+        assert_eq!(stats.get(1000, "APSS"), Err(Error::InvalidOperation));
+    }
+
+    #[test]
+    fn negative_overflow_and_nonnumeric_values_are_not_zero() {
+        for text in [
+            "-1",
+            "+1",
+            "NaN",
+            "inf",
+            "5 extra",
+            "18446744073709551616",
+            "0x",
+        ] {
+            assert_eq!(unsigned_counter(text), Err(Error::BadValue));
         }
-        assert!(!p.support_connectivity_subsys());
-        teardown(&r);
+        assert_eq!(
+            Unit::Milliseconds.milliseconds(u64::MAX),
+            Err(Error::BadValue)
+        );
+        assert_eq!(Unit::Ticks(0).milliseconds(1), Err(Error::BadValue));
+        assert_eq!(Unit::Ticks(32768).milliseconds(32768), Ok(1000));
+        sample("9223372036854775808", "0", "0", 5000);
+        assert_eq!(
+            Statistics::new(Some(source())).get(1000, "APSS"),
+            Err(Error::BadValue)
+        );
+        sample("NaN", "0", "0", 5000);
+        assert_eq!(
+            Statistics::new(Some(source())).get(1000, "APSS"),
+            Err(Error::BadValue)
+        );
+        sample("\0", "0", "0", 5000);
+        assert_eq!(
+            Statistics::new(Some(source())).get(1000, "APSS"),
+            Err(Error::BadValue)
+        );
+        sample(&"9".repeat(129), "0", "0", 5000);
+        assert_eq!(
+            Statistics::new(Some(source())).get(1000, "APSS"),
+            Err(Error::BadValue)
+        );
     }
 
     #[test]
-    fn parser_select_follows_ro_hardware() {
-        assert!(!select_parser("qcom").support_connectivity_subsys());
-        assert!(select_parser("mt6985").support_connectivity_subsys());
-        assert!(!select_parser("mt6893").support_connectivity_subsys());
-        assert!(select_parser("mt6789").support_connectivity_subsys());
-    }
-
-    #[test]
-    fn stats_line_parses_transitions_and_residency_ms() {
-        let s = parse_stats_line("APSS", "APSS 12 4.5").unwrap();
-        assert_eq!(s.total_transitions, 12);
-        assert_eq!(s.residency_in_msec_since_boot, 4500);
-    }
-
-    #[test]
-    fn trigger_dump_refused_without_prop() {
-        let (r, _g) = setup("trigger_off");
-        assert_eq!(trigger_dump_type(2), RESULT_UN_SUPPORTED);
-        teardown(&r);
-    }
-
-    #[test]
-    fn trigger_dump_type_gates_and_routing() {
-        let (r, _g) = setup("trigger_on");
-        io_shim::property_set("sys.oplus.rpmh.trigger_dump", "true");
-        w(&r, "proc/sysrq-trigger", "");
-        w(&r, "sys/class/misc/scp/wdt_reset", "");
-        assert_eq!(trigger_dump_type(2), 0);
-        assert_eq!(trigger_dump_type(1), 0);
-        assert_eq!(fs::read_to_string(r.join("proc/sysrq-trigger")).unwrap(), "c");
-        assert_eq!(fs::read_to_string(r.join("sys/class/misc/scp/wdt_reset")).unwrap(), "1");
-        assert_eq!(trigger_dump_type(9), 9);
-        teardown(&r);
+    fn caller_and_name_checks_precede_reads_and_dump_is_always_disabled() {
+        let stats = Statistics::new(Some(source()));
+        assert_eq!(stats.get(10001, "APSS"), Err(Error::PermissionDenied));
+        assert_eq!(stats.get(1000, "MPSS"), Err(Error::Unsupported));
+        assert_eq!(stats.get(u32::MAX, "APSS"), Err(Error::PermissionDenied));
+        io_shim::mock_property("sys.oplus.rpmh.trigger_dump", "true");
+        io_shim::mock_property("persist.vendor.oplus.rpmh.trigger_dump", "true");
+        for kind in [-1, 0, 1, 2, 9, i32::MAX] {
+            assert_eq!(trigger_dump_type(kind), RESULT_UN_SUPPORTED);
+        }
+        assert!(io_shim::mock_reads().is_empty());
     }
 }

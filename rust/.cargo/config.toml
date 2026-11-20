@@ -1,13 +1,12 @@
 # Cross-build settings for the AIDL HAL.
 # scripts/build_rust.sh sets ANDROID_NDK_HOME (which puts the clang driver on
-# PATH) and LIBBINDER_NDK (the platform libbinder_ndk.so, passed as a link arg).
+# PATH) and LIBBINDER_NDK (the real platform library selected by build.rs).
 [target.aarch64-linux-android]
 linker = "aarch64-linux-android35-clang"
 rustflags = [
     "-C", "link-arg=-Wl,--no-undefined",
     "-C", "link-arg=-Wl,-z,relro,-z,now",
     "-C", "link-arg=-Wl,--build-id=none",
-    "-C", "link-arg=-llog",
 ]
 
 [build]

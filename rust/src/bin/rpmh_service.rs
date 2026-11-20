@@ -9,26 +9,30 @@
 //
 // The log tag is "vendor.oplus.hardware.rpmh-V1-service".
 
-#[path = "../wire.rs"]
-mod wire;
 #[path = "../hal.rs"]
 mod hal;
+#[path = "../wire.rs"]
+mod wire;
 
 use std::ffi::CString;
 use std::os::raw::c_char;
 
 use hal::{on_create, on_destroy, on_transact, DESCRIPTOR, LOG_TAG};
 use wire::{
-    log, AIBinder_Class_define, AIBinder_new, ABinderProcess_joinThreadPool,
-    ABinderProcess_setThreadPoolMaxThreadCount, AServiceManager_addService, LOG_LEVEL_ERROR,
-    LOG_LEVEL_INFO,
+    log, ABinderProcess_joinThreadPool, ABinderProcess_setThreadPoolMaxThreadCount,
+    AIBinder_Class_define, AIBinder_markVintfStability, AIBinder_new, AServiceManager_addService,
+    LOG_LEVEL_ERROR, LOG_LEVEL_INFO,
 };
 
 fn main() {
     // SAFETY: plain libc/binder calls with scalar arguments.
     let rc = unsafe { ABinderProcess_setThreadPoolMaxThreadCount(0) };
     if !rc {
-        log(LOG_LEVEL_ERROR, LOG_TAG, "setThreadPoolMaxThreadCount(0) failed");
+        log(
+            LOG_LEVEL_ERROR,
+            LOG_TAG,
+            "setThreadPoolMaxThreadCount(0) failed",
+        );
     }
 
     let descriptor = CString::new(DESCRIPTOR).unwrap();
@@ -54,8 +58,26 @@ fn main() {
         std::process::exit(1);
     }
 
+    unsafe { AIBinder_markVintfStability(binder) };
+
     let suffix = std::env::var("OPLUS_RPMH_INSTANCE").unwrap_or_default();
-    let name = format!("{}/{}", DESCRIPTOR, if suffix.is_empty() { "default" } else { &suffix });
+    if suffix.len() > 64
+        || !suffix
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+    {
+        log(LOG_LEVEL_ERROR, LOG_TAG, "invalid instance suffix");
+        std::process::exit(1);
+    }
+    let name = format!(
+        "{}/{}",
+        DESCRIPTOR,
+        if suffix.is_empty() {
+            "default"
+        } else {
+            &suffix
+        }
+    );
     let instance = CString::new(name.clone()).unwrap();
     // SAFETY: binder is a live AIBinder we own; instance is NUL-terminated.
     let status = unsafe { AServiceManager_addService(binder, instance.as_ptr() as *const c_char) };

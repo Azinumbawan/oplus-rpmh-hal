@@ -4,6 +4,7 @@
 // wire contract described alongside the interface.
 package vendor.oplus.hardware.rpmh;
 
+@VintfStability
 parcelable PowerStateSubsystemSleepState {
     String name;
     long version;

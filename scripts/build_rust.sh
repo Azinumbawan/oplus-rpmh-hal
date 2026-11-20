@@ -1,44 +1,19 @@
 #!/bin/bash
-# Build the Rust RPMH HAL for aarch64 Android, then verify the artifact.
-# ANDROID_NDK_HOME is the NDK root; LIBBINDER_NDK is the platform library to
-# link against. Both are documented in README.md.
+# Host memory-fixture tests and cross-build only; no HAL execution.
 set -euo pipefail
-
-: "${ANDROID_NDK_HOME:?set ANDROID_NDK_HOME to the Android NDK root}"
-: "${LIBBINDER_NDK:?set LIBBINDER_NDK to the platform libbinder_ndk.so}"
-
+: "${ANDROID_NDK_HOME:?set ANDROID_NDK_HOME to an existing NDK}"
+: "${LIBBINDER_NDK:?set LIBBINDER_NDK to the real target-platform library}"
 W=$(cd "$(dirname "$0")/.." && pwd)
 cd "$W/rust"
-
-NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
-[[ -x "$NDK_BIN/aarch64-linux-android35-clang" ]] || {
-    echo "missing aarch64-linux-android35-clang under $NDK_BIN" >&2
-    exit 1
-}
-export PATH="$NDK_BIN:$PATH"
-
-echo "=== host unit tests (parsers, adapters) ==="
-cargo test --offline
-echo
-
-echo "=== cross-build aarch64-linux-android (release) ==="
-export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="\
--C link-arg=-Wl,--no-undefined \
--C link-arg=-Wl,-z,relro,-z,now \
--C link-arg=-Wl,--build-id=none \
--C link-arg=-llog \
--C link-arg=$LIBBINDER_NDK"
-cargo build --release --offline --target aarch64-linux-android --bins
-
-OUT=target/aarch64-linux-android/release
+NDK="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/${NDK_HOST_TAG:-linux-x86_64}"
+export PATH="$NDK/bin:$PATH"
+TOOLCHAIN=${RUST_TOOLCHAIN:-stable}
+rustup run "$TOOLCHAIN" cargo test --offline --lib
+rustup run "$TOOLCHAIN" cargo build --release --offline --target aarch64-linux-android --bin rpmh_service
+OUT="${CARGO_TARGET_DIR:-target}/aarch64-linux-android/release"
 SRC="$OUT/rpmh_service"
 DST="$OUT/vendor.oplus.hardware.rpmh-V1-service"
-[[ -f "$SRC" ]] || { echo "build produced no binary" >&2; exit 1; }
+[[ -f "$SRC" ]] || { echo "build produced no service" >&2; exit 1; }
 install -m 0755 "$SRC" "$DST"
-
-echo
-echo "=== built ==="
-ls -la "$DST"
-"$NDK_BIN/llvm-readelf" -d "$DST" | grep NEEDED
-"$NDK_BIN/llvm-readelf" -p .comment "$DST" | head -5
-echo BUILD_OK
+"$NDK/bin/llvm-readelf" -d "$DST"
+echo "Built IRpmh V1; no cumulative backend is enabled without a verified driver profile."

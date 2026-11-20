@@ -1,5 +1,4 @@
-# Pinned toolchain for reproducible builds.
+# Use installed stable; host tests must not auto-install a toolchain or target.
 [toolchain]
-channel = "1.99.1"
+channel = "stable"
 profile = "minimal"
-targets = ["aarch64-linux-android"]

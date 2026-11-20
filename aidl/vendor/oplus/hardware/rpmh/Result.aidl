@@ -10,6 +10,7 @@
 package vendor.oplus.hardware.rpmh;
 
 @Backing(type="int")
+@VintfStability
 enum Result {
     UN_SUPPORTED = -1,
     PERMISSION_DENIED = -2,

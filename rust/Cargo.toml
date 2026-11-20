@@ -2,6 +2,7 @@
 name = "rpmh-service"
 version = "1.0.0"
 edition = "2021"
+rust-version = "1.95"
 
 # lib: the platform parsers and trigger-dump paths (host-testable core).
 [lib]
@@ -13,6 +14,8 @@ path = "src/lib.rs"
 [[bin]]
 name = "rpmh_service"
 path = "src/bin/rpmh_service.rs"
+test = false
+bench = false
 
 [profile.release]
 opt-level = 2

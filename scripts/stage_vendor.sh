@@ -1,31 +1,40 @@
 #!/bin/bash
-# Stage the built HAL binary into an unpacked ROM tree.
-#
-# Staged path (relative to ROM_TREE):
-#   vendor/bin/hw/vendor.oplus.hardware.rpmh-V1-service
-#
-# The init rc (vendor/etc/init/vendor.oplus.hardware.rpmh-V1-service.rc) and
-# the VINTF fragment (vendor/etc/vintf/manifest/manifest_rpmh_aidl.xml) that
-# reference this path are supplied by the target platform and are not touched.
-#
-# This script only installs the binary into the unpacked tree. It does not
-# repack an image, flash a device, or modify fs_config / file_contexts.
+# Explicit copy; the caller must independently review daemon/manifest/policy.
 set -euo pipefail
-
-ROM_TREE=${ROM_TREE:-}
-if [[ -z "$ROM_TREE" ]]; then
-    echo "set ROM_TREE to the root of the unpacked ROM tree" >&2
-    exit 1
-fi
-
+: "${ROM_TREE:?set ROM_TREE to an unpacked tree}"
+: "${RPMH_RELATIVE_EXECUTABLE:?choose a reviewed vendor/bin/hw or odm/bin/hw V1 deployment path}"
+case "$RPMH_RELATIVE_EXECUTABLE" in
+    vendor/bin/hw/vendor.oplus.hardware.rpmh-V1-service|odm/bin/hw/vendor.oplus.hardware.rpmh-V1-service) ;;
+    *) echo "unrecognized IRpmh V1 deployment path" >&2; exit 1 ;;
+esac
 W=$(cd "$(dirname "$0")/.." && pwd)
-SRC="$W/rust/target/aarch64-linux-android/release/vendor.oplus.hardware.rpmh-V1-service"
+SRC="${RPMH_ARTIFACT:-$W/rust/target/aarch64-linux-android/release/vendor.oplus.hardware.rpmh-V1-service}"
+[[ -f "$SRC" ]] || { echo "missing artifact" >&2; exit 1; }
 
-GRN=$'\033[32m'; RED=$'\033[31m'; NC=$'\033[0m'
+canonical_directory() {
+    local resolved
+    [[ -d "$1" ]] || return 1
+    if command -v realpath >/dev/null 2>&1 && resolved=$(realpath -e -- "$1" 2>/dev/null); then
+        [[ -d "$resolved" ]] || return 1
+        printf '%s\n' "$resolved"
+    elif command -v readlink >/dev/null 2>&1 && resolved=$(readlink -f -- "$1" 2>/dev/null); then
+        [[ -d "$resolved" ]] || return 1
+        printf '%s\n' "$resolved"
+    else
+        return 1
+    fi
+}
 
-[[ -f "$SRC" ]] || { echo -e "${RED}missing $SRC: run scripts/build_rust.sh first${NC}"; exit 1; }
-
-live="$ROM_TREE/vendor/bin/hw/vendor.oplus.hardware.rpmh-V1-service"
-install -m 0755 "$SRC" "$live"
-echo -e "${GRN}staged${NC} $live"
-echo "done"
+# Preserve an explicitly selected root alias, but not an internal escape.
+ROM_ROOT=$(canonical_directory "$ROM_TREE") || { echo "missing or unresolvable ROM root" >&2; exit 1; }
+DEST_PARENT=$(canonical_directory "${ROM_ROOT%/}/${RPMH_RELATIVE_EXECUTABLE%/*}") || { echo "missing or unresolvable deployment directory" >&2; exit 1; }
+case "$DEST_PARENT/" in
+    "${ROM_ROOT%/}/"*) ;;
+    *) echo "deployment directory escapes ROM root" >&2; exit 1 ;;
+esac
+DEST="$DEST_PARENT/${RPMH_RELATIVE_EXECUTABLE##*/}"
+[[ ! -L "$DEST" ]] || { echo "destination is a symlink" >&2; exit 1; }
+[[ ! -e "$DEST" || -f "$DEST" ]] || { echo "destination is not a regular file" >&2; exit 1; }
+# These pathname checks are not atomic protection against concurrent renames.
+install -m 0755 -- "$SRC" "$DEST"
+echo "Copied $DEST; no init, manifest, policy, fs_config or image changes were made."
